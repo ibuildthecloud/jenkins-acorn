@@ -1,0 +1,152 @@
+args: {
+	// The default admin user that is created
+	adminUser: "admin"
+}
+
+containers: jenkins: {
+	image:   "jenkins/jenkins:lts-alpine"
+	command: "--httpPort=8080"
+	ports: {
+		publish:  "8080/http"
+		internal: 50000
+	}
+	env: {
+		SECRETS:                  "/run/secrets/additional"
+		JENKINS_OPTS:             "--webroot=/var/jenkins_cache/war"
+		JENKINS_SLAVE_AGENT_PORT: "50000"
+		CASC_JENKINS_CONFIG:      "/var/jenkins_home/casc_configs"
+	}
+	dirs: {
+		"/run/secrets/additional":         "secret://admin-user"
+		"/tmp":                            "ephemeral://"
+		"/usr/share/jenkins/ref/plugins/": "ephemeral://plugin-dir"
+		"/var/jenkins_plugins":            "ephemeral://plugins"
+		"/var/jenkins_cache":              "ephemeral://cache"
+		"/var/jenkins_home/casc_configs":  "secret://casc"
+		"/var/jenkins_home":               "jenkins-home"
+	}
+    probes: {
+        "startup": {
+            http: url: "http://localhost:8080/login"
+            failureThreshold: 12
+            periodSeconds: 10
+            timeoutSeconds: 5
+        }
+        "ready":{
+            failureThreshold: 3
+            http: url: "http://localhost:8080/login"
+            periodSeconds: 10
+            timeoutSeconds: 5
+        }
+    }
+	sidecars: {
+		init: {
+			init:       true
+			image:      "jenkins/jenkins:lts-alpine"
+			entrypoint: "sh /var/jenkins_config/apply_config.sh"
+			dirs:       containers.jenkins.dirs
+            files: {
+                "/var/jenkins_config/apply_config.sh": localData.applyConfig
+                "/var/jenkins_home/plugins.txt": std.join([for k, v in localData.plugins { "\(k):\(v)" }], "\n")
+            }
+		}
+	}
+    permissions: {
+        rules: [
+            "pods",
+            "pods/exec",
+            "read pods/log",
+            {
+                apiGroups: [""]
+                resources: ["events"]
+                verbs: ["watch"]
+            },
+            {
+                apiGroups: [""]
+                resources: ["secrets"]
+                verbs: ["get"]
+            },
+        ]
+    }
+}
+
+secrets: {
+	"admin-user": {
+		type: "basic"
+		data: {
+			username: args.adminUser
+		}
+	}
+    casc: {
+        type: "template"
+        data: {
+            "jenkins.yaml": std.toYAML(localData.casc)
+        }
+    }
+}
+
+localData: {
+	casc: {
+		jenkins: {
+			authorizationStrategy: {
+				loggedInUsersCanDoAnything: {
+					allowAnonymousRead: false
+				}
+            }
+            numExecutors: 0,
+            securityRealm: {
+                local: {
+                    users: [{
+                        id:       "${username}"
+                        name:     "Jenkins Admin"
+                        password: "${password}"
+                    }]
+                }
+            }
+            clouds: [{
+                kubernetes: {
+                    containerCap: 10
+                    containerCapStr: "10"
+                    name: "kubernetes"
+                    templates: [{
+                        id: "ffdebd4c-de3f-4c59-bc3b-a0ce5786a5a4"
+                        name: "default"
+                        nodeUsageMode: "NORMAL"
+                        containers: [{
+                            args: "^${computer.jnlpmac} ^${computer.name}"
+                            envVars: [{
+                                envVar: {
+                                    key: "JENKINS_URL"
+                                    value: "http://jenkins:8080"
+                                }
+                            }]
+                            image: "${image://agent}"
+                            name: "jnlp"
+                            workingDir: "/home/jenkins/agent"
+                        }]
+                    }]
+                }
+            }]
+        }
+	}
+
+	applyConfig: """
+        set -e
+        jenkins-plugin-cli --verbose --war "/usr/share/jenkins/jenkins.war" --plugin-file "/var/jenkins_home/plugins.txt" --latest true
+        cp -f /usr/share/jenkins/ref/plugins/* /var/jenkins_plugins/
+        echo "finished initialization"
+        """
+
+	plugins: {
+	    kubernetes: "3600.v144b_cd192ca_a_"
+		"workflow-aggregator": "581.v0c46fa_697ffd"
+		git: "4.11.3"
+		"configuration-as-code": "1429.v09b_044a_c93de"
+    }
+}
+
+images: {
+    agent: {
+        build: "."
+    }
+}
